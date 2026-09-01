@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>TelePrompter</string>
+    <key>CFBundleDisplayName</key>
+    <string>TelePrompter</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.teleprompter.app</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>TelePrompter</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>TelePrompter uses your microphone to detect your speech and automatically follow your position in the script. All processing is done locally on your Mac.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>TelePrompter uses speech recognition to follow your spoken position in the teleprompter script. Recognition is performed on-device when possible.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2024 TelePrompter. All rights reserved.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>LSUIElement</key>
+    <false/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,4 @@
+.build/
+*.xcuserstate
+.DS_Store
+TelePrompter.app/
