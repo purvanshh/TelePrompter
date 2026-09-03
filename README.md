@@ -17,9 +17,39 @@ A native macOS application that displays your script in a floating overlay and a
 ## Requirements
 
 - macOS 14 (Sonoma) or later
+- Apple Silicon (arm64) for the Homebrew cask
 - Microphone access (for voice following)
 - Speech Recognition access (prompted on first use)
 - Swift 5.9+ / Xcode Command Line Tools (for building from source)
+
+---
+
+## Install via Homebrew
+
+Easiest way to install TelePrompter (no need to build from source):
+
+```bash
+brew tap purvanshh/homebrew-teleprompter
+brew install --cask teleprompter
+```
+
+> On newer Homebrew versions you may be asked to trust the tap first:
+> `brew trust purvanshh/teleprompter`
+
+### First launch (unsigned build)
+
+This build is **not notarized** (it requires an Apple Developer account + certificates), so macOS may warn that the developer cannot be verified. To open it, either:
+
+**Option 1 — Remove the quarantine flag:**
+```bash
+xattr -dr com.apple.quarantine "/Applications/TelePrompter.app"
+open "/Applications/TelePrompter.app"
+```
+
+**Option 2 — Right-click → Open:**
+In Finder, right-click `TelePrompter.app` → click **Open** → click **Open** in the dialog.
+
+This only needs to be done once; the app runs normally afterward.
 
 ---
 
