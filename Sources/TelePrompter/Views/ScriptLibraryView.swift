@@ -28,8 +28,8 @@ struct ScriptLibraryView: View {
 
             // Editor
             if let id = selectedScriptID,
-               let idx = storage.scripts.firstIndex(where: { $0.id == id }) {
-                ScriptEditorView(script: $storage.scripts[idx])
+               storage.scripts.contains(where: { $0.id == id }) {
+                ScriptEditorView(scriptID: id)
                     .id(id)
             } else {
                 emptyState
@@ -105,11 +105,17 @@ struct ScriptLibraryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding()
             } else {
-                List(storage.scripts, selection: $selectedScriptID) { script in
-                    scriptRow(script)
-                        .tag(script.id)
+                List(selection: $selectedScriptID) {
+                    ForEach(storage.scripts) { script in
+                        scriptRow(script)
+                            .tag(script.id)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                    }
                 }
                 .listStyle(.sidebar)
+                // Single-click opens in editor (selection binding). Double-click loads.
+                // Use onChange + keyboard/context for load — do NOT put TapGesture on rows
+                // (that steals List selection and forces 2–3 clicks).
             }
         }
     }
@@ -130,28 +136,28 @@ struct ScriptLibraryView: View {
             }
             Spacer()
 
-            // Load indicator
             if state.loadedScript?.id == script.id {
                 Circle()
                     .fill(.green)
                     .frame(width: 7, height: 7)
+                    .help("Loaded in teleprompter")
             }
         }
-        .contentShape(Rectangle())
+        .padding(.vertical, 2)
         .contextMenu {
             Button("Open in Editor") { selectedScriptID = script.id }
             Button("Load in Teleprompter") { loadScript(script) }
             Divider()
-            Button("Rename…") { renameScript = script; renameTitle = script.title }
-            Button("Duplicate") { let _ = storage.duplicate(script) }
+            Button("Rename…") {
+                renameScript = script
+                renameTitle = script.title
+            }
+            Button("Duplicate") { _ = storage.duplicate(script) }
             Divider()
             Button("Delete", role: .destructive) {
                 scriptToDelete = script
                 showDeleteConfirm = true
             }
-        }
-        .onTapGesture(count: 2) {
-            loadScript(script)
         }
     }
 

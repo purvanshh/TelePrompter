@@ -28,19 +28,19 @@ final class SpeechAlignmentEngine {
 
     struct Config {
         var searchRadius: Int = 80
-        var moveThreshold: Double = 0.30
-        var backtrackThreshold: Double = 0.70
+        var moveThreshold: Double = 0.28
+        var backtrackThreshold: Double = 0.65
         /// 0 = Strict, 1 = Lenient. Affects threshold, radius, min tokens, jump caps.
         var sensitivity: Double = 0.5
-        var backtrackPenalty: Double = 0.45
+        var backtrackPenalty: Double = 0.35
         /// Min words in transcript before attempting alignment (overridden by sensitivity)
-        var minTranscriptWords: Int = 2
+        var minTranscriptWords: Int = 1
         /// Max number of confirmed tokens to retain across sessions (rolling window)
         var confirmedTokenCap: Int = 40
-        /// Consecutive agreeing partials required before committing a *large ambiguous* jump
+        /// Consecutive agreeing partials required before committing a large backward snap
         var partialStabilityHits: Int = 2
         /// How close consecutive partial candidates must be (in words) to count as agreement
-        var partialAgreementWindow: Int = 4
+        var partialAgreementWindow: Int = 5
     }
 
     var config: Config
@@ -83,39 +83,49 @@ final class SpeechAlignmentEngine {
 
     // MARK: - Sensitivity-derived knobs
 
-    /// Effective search radius: Strict ≈ 45, Normal ≈ 70, Lenient ≈ 100
+    /// Local search radius: Strict ≈ 60, Normal ≈ 100, Lenient ≈ 140
     private var effectiveSearchRadius: Int {
-        Int(45.0 + config.sensitivity * 55.0)
+        Int(60.0 + config.sensitivity * 80.0)
     }
 
-    /// Move confidence threshold: Strict ≈ 0.40, Normal ≈ 0.32, Lenient ≈ 0.26
+    /// Move confidence threshold: Strict ≈ 0.34, Normal ≈ 0.28, Lenient ≈ 0.22
     private var effectiveMoveThreshold: Double {
-        max(0.24, config.moveThreshold + (0.5 - config.sensitivity) * 0.20)
+        max(0.20, config.moveThreshold + (0.5 - config.sensitivity) * 0.16)
     }
 
-    /// Min tokens before aligning: Strict 3, Normal 2, Lenient 2
+    /// Min tokens before aligning
     private var effectiveMinWords: Int {
-        if config.sensitivity < 0.33 { return 3 }
-        return 2
+        config.sensitivity < 0.33 ? 2 : 1
     }
 
-    /// Required uniqueness margin (best − second-best): only applied to large jumps
+    /// Uniqueness margin for large/global jumps
     private var effectiveUniquenessMargin: Double {
-        max(0.02, 0.08 - config.sensitivity * 0.05)
+        max(0.015, 0.06 - config.sensitivity * 0.04)
     }
 
-    /// Max words a single partial may advance — roomy so catch-up stays responsive
+    /// Max words a single partial may advance locally
     private var maxPartialJump: Int {
-        if config.sensitivity < 0.33 { return 14 }
-        if config.sensitivity < 0.66 { return 22 }
-        return 30
+        if config.sensitivity < 0.33 { return 28 }
+        if config.sensitivity < 0.66 { return 45 }
+        return 70
     }
 
-    /// Max words a final result may advance
+    /// Max words a final result may advance locally
     private var maxFinalJump: Int {
-        if config.sensitivity < 0.33 { return 35 }
-        if config.sensitivity < 0.66 { return 50 }
-        return 70
+        if config.sensitivity < 0.33 { return 50 }
+        if config.sensitivity < 0.66 { return 90 }
+        return 140
+    }
+
+    private static let stopwords: Set<String> = [
+        "a", "an", "the", "and", "or", "but", "to", "of", "in", "on", "at",
+        "for", "is", "are", "was", "were", "be", "been", "am", "i", "you",
+        "we", "they", "he", "she", "it", "this", "that", "with", "as", "by",
+        "from", "my", "our", "your", "their"
+    ]
+
+    private func contentWordCount(in tokens: [String]) -> Int {
+        tokens.filter { !Self.stopwords.contains($0) && $0.count > 2 }.count
     }
 
     // MARK: - Lifecycle
@@ -244,35 +254,63 @@ final class SpeechAlignmentEngine {
     private func alignAndEmit(tokens: [String], isPartial: Bool) {
         guard !tokens.isEmpty, !scriptTokens.isEmpty else { return }
 
-        // Prefer recently spoken words; keep enough context for catch-up when lagging.
-        let suffixLen = isPartial ? min(18, tokens.count) : min(28, tokens.count)
-        let matchTokens = Array(tokens.suffix(suffixLen))
-
+        // Short recent tip → tracks live speech (less lag).
+        // Longer window → used to relocate when the reader jumps sections.
+        let tipTokens = Array(tokens.suffix(min(8, tokens.count)))
+        let relocateTokens = Array(tokens.suffix(min(14, tokens.count)))
         let currentTokenIndex = tokenIndex(forDisplayWord: currentWordIndex)
 
-        let result = FuzzyMatcher.findBestAlignment(
+        // 1) Local catch-up around the current position (fast, low lag)
+        let local = FuzzyMatcher.findBestAlignment(
             scriptTokens: scriptTokens,
-            transcriptTokens: matchTokens,
+            transcriptTokens: tipTokens,
             currentIndex: currentTokenIndex,
             searchRadius: effectiveSearchRadius,
-            backtrackPenalty: config.backtrackPenalty,
-            forwardPenaltyPerWord: 0.045,
-            minForwardFactor: 0.35
+            backtrackPenalty: 0.35,
+            forwardPenaltyPerWord: 0.015,
+            minForwardFactor: 0.65,
+            lookBehindFraction: 0.35
         )
 
-        var threshold = effectiveMoveThreshold
-        // When stalled on a hard word, lower the bar so we can skip past it.
-        if stalledUpdates >= 3 {
-            threshold -= 0.06
-        }
-        if isPartial {
-            threshold += 0.02
-        } else {
-            threshold -= 0.04
+        let localCandidate = displayCandidate(from: local)
+
+        // 2) Global relocate when the speaker starts reading from somewhere else.
+        // Skip when local tracking is healthy to keep long scripts responsive.
+        var relocate: FuzzyMatcher.AlignmentResult? = nil
+        let enoughForRelocate = relocateTokens.count >= 4 && contentWordCount(in: relocateTokens) >= 2
+        let localLooksStuck = local.confidence < effectiveMoveThreshold + 0.08
+            || abs(localCandidate - currentWordIndex) <= 2
+            || stalledUpdates >= 1
+        if enoughForRelocate && localLooksStuck {
+            relocate = FuzzyMatcher.findBestAlignmentGlobal(
+                scriptTokens: scriptTokens,
+                transcriptTokens: relocateTokens,
+                currentIndex: currentTokenIndex,
+                backtrackPenalty: 0.12
+            )
         }
 
-        let confidence = result.confidence
+        var threshold = effectiveMoveThreshold
+        if stalledUpdates >= 2 { threshold -= 0.05 }
+        if !isPartial { threshold -= 0.03 }
+
+        let relocateCandidate = relocate.map { displayCandidate(from: $0) }
+
+        let useRelocate: Bool = {
+            guard let relocate, let relocateCandidate else { return false }
+            let far = abs(relocateCandidate - currentWordIndex) > 12
+            let unique = relocate.scoreMargin >= max(effectiveUniquenessMargin, 0.04)
+            let strong = relocate.confidence >= threshold + 0.05
+            let better = relocate.confidence + 0.05 >= local.confidence
+            // Prefer relocate over local when local stayed near current but speech matches elsewhere
+            let localStayedNear = abs(localCandidate - currentWordIndex) <= 8
+            return far && unique && strong && (better || localStayedNear)
+        }()
+
+        let chosen = useRelocate ? relocate! : local
+        let confidence = chosen.confidence
         lastConfidence = confidence
+        let matchTokens = useRelocate ? relocateTokens : tipTokens
 
         guard confidence >= threshold else {
             noteStall()
@@ -281,41 +319,49 @@ final class SpeechAlignmentEngine {
             return
         }
 
-        let matchStart = result.bestWordIndex
-        let matchEndToken = min(scriptTokens.count - 1, matchStart + max(0, result.matchedTokenCount - 1))
-        let candidate = displayWord(forToken: matchEndToken)
+        var candidate = displayCandidate(from: chosen)
+        // Small lead bias so the highlight stays with live speech (ASR lags a bit).
+        if candidate >= currentWordIndex {
+            let lead = isPartial ? 1 : 0
+            candidate = min(document.totalWords - 1, candidate + lead)
+        }
+
         let distance = candidate - currentWordIndex
         let absDistance = abs(distance)
 
-        // Uniqueness only gates large leaps — small/medium forward catch-up stays responsive.
-        let needsStrongUniqueness = absDistance > 14
-        if needsStrongUniqueness && result.scoreMargin < effectiveUniquenessMargin && stalledUpdates < 4 {
+        // Uniqueness gate for large non-relocate leaps only
+        if !useRelocate && absDistance > 20
+            && chosen.scoreMargin < effectiveUniquenessMargin
+            && stalledUpdates < 3 {
             noteStall()
             emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
                        transcript: matchTokens.joined(separator: " "))
             return
         }
 
-        // Movement policy — prefer catching up when the speaker is ahead.
         var accepted: Int? = nil
 
-        if distance >= 0 {
+        if useRelocate {
+            // Distinctive phrase found elsewhere — jump there immediately.
+            accepted = candidate
+        } else if distance >= 0 {
             let maxJump = isPartial ? maxPartialJump : maxFinalJump
             if distance <= maxJump {
                 accepted = candidate
-            } else if confidence >= threshold + 0.08 {
-                // Speaker got far ahead — catch up in chunks instead of staying stuck.
+            } else {
+                // Chunk catch-up toward the true match (don't stay frozen far behind).
                 accepted = currentWordIndex + maxJump
             }
-        } else if absDistance <= 6 && confidence >= config.backtrackThreshold
-                    && result.scoreMargin >= effectiveUniquenessMargin * 0.4 {
+        } else if absDistance <= 12 && confidence >= config.backtrackThreshold * 0.9 {
+            accepted = candidate
+        } else if absDistance <= 40 && chosen.scoreMargin >= effectiveUniquenessMargin
+                    && confidence >= threshold + 0.08 {
+            // Distinctive match behind current (started reading earlier section)
             accepted = candidate
         }
 
-        // Stuck recovery: if we keep failing to move but ASR matches somewhere ahead,
-        // nudge forward by a few words so hard tokens like "checkout" don't freeze us.
-        if accepted == nil && stalledUpdates >= 4 && distance > 0 {
-            accepted = min(candidate, currentWordIndex + 6)
+        if accepted == nil && stalledUpdates >= 3 && distance > 0 {
+            accepted = min(candidate, currentWordIndex + 12)
         }
 
         guard let target = accepted else {
@@ -325,44 +371,25 @@ final class SpeechAlignmentEngine {
             return
         }
 
-        // Stability: forward catch-up commits immediately. Only large ambiguous jumps wait.
-        if isPartial {
-            let forwardDistance = target - currentWordIndex
-            let needsHits: Int
-            if forwardDistance <= 10 || stalledUpdates >= 3 {
-                needsHits = 1
-            } else if forwardDistance <= 18 {
-                needsHits = 1
+        // No multi-hit wait for forward/relocate — lag is worse than occasional nudge.
+        // Only require agreement for large backward snaps.
+        if isPartial && target < currentWordIndex - 4 {
+            if let pending = pendingCandidate,
+               abs(target - pending) <= config.partialAgreementWindow {
+                pendingHits += 1
+                pendingCandidate = target
             } else {
-                needsHits = config.partialStabilityHits
+                pendingCandidate = target
+                pendingHits = 1
             }
-
-            if needsHits > 1 {
-                if let pending = pendingCandidate,
-                   abs(target - pending) <= config.partialAgreementWindow {
-                    pendingHits += 1
-                    pendingCandidate = target
-                } else {
-                    pendingCandidate = target
-                    pendingHits = 1
-                }
-                guard pendingHits >= needsHits else {
-                    noteStall()
-                    emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
-                               transcript: matchTokens.joined(separator: " "))
-                    return
-                }
+            guard pendingHits >= config.partialStabilityHits else {
+                noteStall()
+                emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
+                           transcript: matchTokens.joined(separator: " "))
+                return
             }
         } else {
             clearPending()
-        }
-
-        // Never move backward accidentally when catching up after a stall
-        if target < currentWordIndex && stalledUpdates >= 2 {
-            noteStall()
-            emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
-                       transcript: matchTokens.joined(separator: " "))
-            return
         }
 
         currentWordIndex = target
@@ -373,6 +400,15 @@ final class SpeechAlignmentEngine {
 
         emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
                    transcript: matchTokens.joined(separator: " "))
+    }
+
+    private func displayCandidate(from result: FuzzyMatcher.AlignmentResult) -> Int {
+        let matchStart = result.bestWordIndex
+        let matchEndToken = min(
+            scriptTokens.count - 1,
+            matchStart + max(0, result.matchedTokenCount - 1)
+        )
+        return displayWord(forToken: matchEndToken)
     }
 
     // MARK: - Helpers

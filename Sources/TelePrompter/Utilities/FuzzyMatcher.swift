@@ -194,7 +194,7 @@ struct FuzzyMatcher {
 
     /// Search for the best alignment of `transcriptTokens` within `scriptTokens`,
     /// searching around `currentIndex ± searchRadius`.
-    /// Strongly prefers positions at or ahead of the current position.
+    /// Prefer nearby positions, but keep enough range to catch up when the speaker leads.
     static func findBestAlignment(
         scriptTokens: [String],
         transcriptTokens: [String],
@@ -202,7 +202,8 @@ struct FuzzyMatcher {
         searchRadius: Int = 50,
         backtrackPenalty: Double = 0.3,
         forwardPenaltyPerWord: Double = 0.08,
-        minForwardFactor: Double = 0.25
+        minForwardFactor: Double = 0.25,
+        lookBehindFraction: Double = 0.25
     ) -> AlignmentResult {
 
         guard !transcriptTokens.isEmpty && !scriptTokens.isEmpty else {
@@ -210,7 +211,8 @@ struct FuzzyMatcher {
                                    matchedTokenCount: 0, scoreMargin: 0)
         }
 
-        let searchStart = max(0, currentIndex - searchRadius / 4) // limited backward search
+        let lookBehind = max(1, Int(Double(searchRadius) * lookBehindFraction))
+        let searchStart = max(0, currentIndex - lookBehind)
         let searchEnd   = min(scriptTokens.count - 1, currentIndex + searchRadius)
 
         guard searchStart <= searchEnd else {
@@ -218,6 +220,55 @@ struct FuzzyMatcher {
                                    matchedTokenCount: 0, scoreMargin: 0)
         }
 
+        return searchRange(
+            scriptTokens: scriptTokens,
+            transcriptTokens: transcriptTokens,
+            currentIndex: currentIndex,
+            searchStart: searchStart,
+            searchEnd: searchEnd,
+            backtrackPenalty: backtrackPenalty,
+            forwardPenaltyPerWord: forwardPenaltyPerWord,
+            minForwardFactor: minForwardFactor
+        )
+    }
+
+    /// Search the entire script (or a very wide range) to relocate when the speaker
+    /// jumps to a different section. Relies on uniqueness — callers should require
+    /// a strong scoreMargin before accepting the result.
+    static func findBestAlignmentGlobal(
+        scriptTokens: [String],
+        transcriptTokens: [String],
+        currentIndex: Int,
+        backtrackPenalty: Double = 0.15
+    ) -> AlignmentResult {
+        guard !transcriptTokens.isEmpty && !scriptTokens.isEmpty else {
+            return AlignmentResult(bestWordIndex: currentIndex, confidence: 0,
+                                   matchedTokenCount: 0, scoreMargin: 0)
+        }
+
+        // Mild preference for staying near current, but allow anywhere if unique.
+        return searchRange(
+            scriptTokens: scriptTokens,
+            transcriptTokens: transcriptTokens,
+            currentIndex: currentIndex,
+            searchStart: 0,
+            searchEnd: scriptTokens.count - 1,
+            backtrackPenalty: backtrackPenalty,
+            forwardPenaltyPerWord: 0.008,
+            minForwardFactor: 0.70
+        )
+    }
+
+    private static func searchRange(
+        scriptTokens: [String],
+        transcriptTokens: [String],
+        currentIndex: Int,
+        searchStart: Int,
+        searchEnd: Int,
+        backtrackPenalty: Double,
+        forwardPenaltyPerWord: Double,
+        minForwardFactor: Double
+    ) -> AlignmentResult {
         var bestIndex = currentIndex
         var bestScore = -1.0
         var secondBestScore = -1.0
@@ -232,14 +283,12 @@ struct FuzzyMatcher {
             )
             var score = rawScore
 
-            // Apply backtrack penalty for positions before current
             if si < currentIndex {
                 score *= (1.0 - backtrackPenalty)
             } else if si > currentIndex {
-                // Penalize matches that are far ahead of the current position.
-                // Nearby contiguous matches are far more likely to be the words
-                // actually being read. Floor is low so distant false positives lose.
                 let distance = Double(si - currentIndex)
+                // Soft decay nearby so catch-up stays responsive; floor keeps far
+                // but unique matches competitive.
                 let decay = 1.0 / (1.0 + forwardPenaltyPerWord * distance)
                 score *= max(minForwardFactor, decay)
             }
