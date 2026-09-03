@@ -36,6 +36,8 @@ final class SpeechAlignmentEngine {
         var backtrackPenalty: Double = 0.40
         /// Min words in transcript before attempting alignment
         var minTranscriptWords: Int = 1
+        /// Max number of confirmed tokens to retain across sessions (rolling window)
+        var confirmedTokenCap: Int = 40
     }
 
     var config: Config
@@ -102,9 +104,9 @@ final class SpeechAlignmentEngine {
 
             // Now commit to confirmed buffer so next session can anchor correctly
             confirmedTokens.append(contentsOf: tokens)
-            // Rolling cap: keep last 40 confirmed words
-            if confirmedTokens.count > 40 {
-                confirmedTokens = Array(confirmedTokens.suffix(40))
+            // Rolling cap — use configurable limit
+            if confirmedTokens.count > config.confirmedTokenCap {
+                confirmedTokens = Array(confirmedTokens.suffix(config.confirmedTokenCap))
             }
             currentSessionTokens = []
             lastAlignedConfirmedCount = confirmedTokens.count
