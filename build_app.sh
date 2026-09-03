@@ -1,7 +1,10 @@
 #!/bin/bash
 # build_app.sh — Builds TelePrompter.app from Swift Package Manager
-# Usage: bash build_app.sh
+# Usage: bash build_app.sh [version]
+#   version: optional version string, defaults to 1.0.0. When provided, also
+#            writes a TelePrompter-<version>.zip release artifact.
 # Output: TelePrompter.app in the current directory
+#         TelePrompter-<version>.zip when a version argument is given
 
 set -e
 
@@ -9,6 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/.build/release"
 APP_NAME="TelePrompter"
 APP_BUNDLE="$SCRIPT_DIR/$APP_NAME.app"
+VERSION="${1:-1.0.0}"
+ZIP_FILE="$SCRIPT_DIR/${APP_NAME}-${VERSION}.zip"
 
 echo "=== Building TelePrompter ==="
 
@@ -26,7 +31,7 @@ cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 # Write Info.plist
-cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -38,7 +43,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.teleprompter.app</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleExecutable</key>
@@ -69,6 +74,18 @@ echo ""
 echo "=== Build complete ==="
 echo "App bundle: $APP_BUNDLE"
 echo ""
+
+# Create a zip release artifact when a version argument was given
+if [ "$#" -gt 0 ]; then
+    echo "=== Creating release artifact ==="
+    rm -f "$ZIP_FILE"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_FILE"
+    SHA256=$(shasum -a 256 "$ZIP_FILE" | awk '{print $1}')
+    echo "Release artifact: $ZIP_FILE"
+    echo "SHA256: $SHA256"
+    echo ""
+fi
+
 echo "To run (bypass Gatekeeper for unsigned build):"
 echo "  xattr -rd com.apple.quarantine \"$APP_BUNDLE\""
 echo "  open \"$APP_BUNDLE\""
