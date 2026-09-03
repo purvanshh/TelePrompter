@@ -127,6 +127,14 @@ final class SessionController: ObservableObject {
                 self?.alignmentEngine.config.sensitivity = sensitivity
             }
             .store(in: &cancellables)
+
+        // Manual seeks (arrows, reset, overlay tap) → re-anchor alignment engine
+        state.manualSeekPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] wordIndex in
+                self?.syncAlignmentEnginePosition(wordIndex: wordIndex)
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Following control
@@ -206,6 +214,32 @@ final class SessionController: ObservableObject {
         }
     }
 
+    // MARK: - Manual seek (keeps alignment engine in sync)
+
+    /// Jump to a sentence and re-anchor the alignment engine so voice following
+    /// continues from the new position instead of yanking back to the old one.
+    func seekToSentence(_ sentenceIndex: Int) {
+        state.jumpToSentence(sentenceIndex)
+    }
+
+    func seekToBeginning() {
+        state.jumpToBeginning()
+    }
+
+    func seekToEnd() {
+        state.jumpToEnd()
+    }
+
+    private func syncAlignmentEnginePosition(wordIndex: Int? = nil) {
+        guard state.followingState.isActive
+                || state.followingState == .paused
+                || state.followingState == .listening
+                || state.followingState == .lowConfidence
+                || state.followingState == .complete else { return }
+        let index = wordIndex ?? state.currentWordIndex
+        alignmentEngine.setPosition(wordIndex: index)
+    }
+
     // MARK: - Recording mode
 
     func toggleRecordingMode() {
@@ -246,6 +280,7 @@ final class SessionController: ObservableObject {
                 let next = self.state.currentWordIndex + 1
                 if next < self.state.document.totalWords {
                     self.state.advanceToWord(next, confidence: 1.0)
+                    self.alignmentEngine.setPosition(wordIndex: next)
                 } else {
                     self.stopAutoScroll()
                 }

@@ -125,7 +125,7 @@ struct AppMenuCommands: Commands {
             .keyboardShortcut(" ", modifiers: [])
 
             Button("Reset Position") {
-                Task { @MainActor in state.jumpToBeginning() }
+                Task { @MainActor in sessionController.seekToBeginning() }
             }
             .keyboardShortcut(.upArrow, modifiers: .command)
 

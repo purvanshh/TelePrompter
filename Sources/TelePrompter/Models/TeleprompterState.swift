@@ -112,6 +112,13 @@ final class TeleprompterState: ObservableObject {
     @Published var actualWPM: Double = 0.0
     @Published var wordsSpokenCount: Int = 0
 
+    /// Fired when the user manually changes position (arrows, reset, overlay tap).
+    /// SessionController uses this to re-anchor the alignment engine.
+    private let manualSeekSubject = PassthroughSubject<Int, Never>()
+    var manualSeekPublisher: AnyPublisher<Int, Never> {
+        manualSeekSubject.eraseToAnyPublisher()
+    }
+
     // Progress
     var progressFraction: Double {
         guard document.totalWords > 0 else { return 0 }
@@ -140,6 +147,7 @@ final class TeleprompterState: ObservableObject {
         transcriptBuffer = ""
         latestPartial = ""
         if followingState == .complete { followingState = .ready }
+        manualSeekSubject.send(0)
     }
 
     func advanceToWord(_ index: Int, confidence: Double) {
@@ -172,6 +180,7 @@ final class TeleprompterState: ObservableObject {
         guard sentenceIndex >= 0 && sentenceIndex < document.totalSentences else { return }
         let sentence = document.sentences[sentenceIndex]
         advanceToWord(sentence.wordRange.lowerBound, confidence: 1.0)
+        manualSeekSubject.send(currentWordIndex)
     }
 
     func jumpToBeginning() {
@@ -180,5 +189,6 @@ final class TeleprompterState: ObservableObject {
 
     func jumpToEnd() {
         advanceToWord(max(0, document.totalWords - 1), confidence: 1.0)
+        manualSeekSubject.send(currentWordIndex)
     }
 }

@@ -205,12 +205,12 @@ struct SpeechSettingsTab: View {
                     .help("When enabled, audio is processed locally without internet. Availability depends on your Mac and language.")
 
                 HStack {
-                    Text("Matching Sensitivity")
+                    Text("Match Leniency")
                     Slider(value: $settings.matchingSensitivity, in: 0...1)
                     Text(sensitivityLabel)
                         .frame(width: 70, alignment: .trailing)
                 }
-                .help("Higher sensitivity means the teleprompter moves with less confidence required.")
+                .help("Strict: higher confidence, smaller search window, fewer jumps. Lenient: moves more easily on weaker matches.")
 
                 Picker("Language", selection: $settings.speechLocale) {
                     ForEach(availableLocales, id: \.0.identifier) { locale, name in

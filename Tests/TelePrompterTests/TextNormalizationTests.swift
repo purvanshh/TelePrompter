@@ -66,10 +66,20 @@ struct TextNormalizationTests {
 
     @Test("Multiple fillers removed")
     func multipleFillers() {
-        let result = TextNormalizer.normalize("well uh basically what I mean is")
+        let result = TextNormalizer.normalize("um uh er what I mean is")
         #expect(!result.contains("uh"))
-        #expect(!result.contains("well"))
-        #expect(!result.contains("basically"))
+        #expect(!result.contains("um"))
+        #expect(!result.contains("er"))
+        #expect(result.contains("what"))
+    }
+
+    @Test("Script-common words like 'so' and 'well' are kept")
+    func keepsScriptCommonWords() {
+        let result = TextNormalizer.normalize("so well like actually right okay")
+        #expect(result.contains("so"))
+        #expect(result.contains("well"))
+        #expect(result.contains("like"))
+        #expect(result.contains("actually"))
     }
 
     @Test("Hyphen treated as word separator")

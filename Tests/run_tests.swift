@@ -32,8 +32,7 @@ struct TextNormalizer {
     ]
 
     static let fillerWords: Set<String> = [
-        "um", "uh", "er", "ah", "like", "so", "well",
-        "basically", "literally", "actually", "right", "okay", "ok"
+        "um", "uh", "er", "ah", "uhm", "err"
     ]
 
     static func normalize(_ text: String) -> [String] {
@@ -94,31 +93,58 @@ struct FuzzyMatcher {
 
     static func scoreSequence(scriptTokens: [String], transcriptTokens: [String],
                                scriptOffset: Int, windowSize: Int = 20) -> Double {
-        guard !transcriptTokens.isEmpty else { return 0 }
+        let (score, _) = scoreSequenceFull(scriptTokens: scriptTokens, transcriptTokens: transcriptTokens,
+                                           scriptOffset: scriptOffset, windowSize: windowSize)
+        return score
+    }
+
+    static func scoreSequenceFull(scriptTokens: [String], transcriptTokens: [String],
+                                   scriptOffset: Int, windowSize: Int = 20) -> (Double, Int) {
+        guard !transcriptTokens.isEmpty else { return (0, 0) }
         let available = min(windowSize, scriptTokens.count - scriptOffset)
-        guard available > 0 else { return 0 }
+        guard available > 0 else { return (0, 0) }
         let scriptWindow = Array(scriptTokens[scriptOffset..<(scriptOffset + available)])
         let compareLen = min(transcriptTokens.count, available)
         let transcriptSlice = Array(transcriptTokens.suffix(compareLen))
-        var totalScore = 0.0, matched = 0, si = 0, ti = 0
+        var totalScore = 0.0, matched = 0, weightSum = 0.0, si = 0, ti = 0
+
+        func compound(_ a: String, _ b0: String, _ b1: String) -> Double {
+            let joined = b0 + b1
+            let sim = similarity(a, joined)
+            if sim >= 0.80 { return sim }
+            if a.hasPrefix(b0) && a.hasSuffix(b1) && a.count >= joined.count - 1 && a.count <= joined.count + 1 {
+                return 0.92
+            }
+            return sim >= 0.72 ? sim : 0
+        }
+
         while si < scriptWindow.count && ti < transcriptSlice.count {
-            let sim = similarity(scriptWindow[si], transcriptSlice[ti])
-            if sim >= 0.75 { totalScore += sim; matched += 1; si += 1; ti += 1 }
-            else {
-                var bestSkip = 0.0
-                let skipMax = min(3, scriptWindow.count - si - 1)
+            let st = scriptWindow[si], tt = transcriptSlice[ti]
+            let sim = similarity(st, tt)
+            let threshold = max(st.count, tt.count) >= 7 ? 0.68 : 0.75
+            if sim >= threshold {
+                totalScore += sim; weightSum += 1; matched += 1; si += 1; ti += 1
+            } else if ti + 1 < transcriptSlice.count, compound(st, tt, transcriptSlice[ti + 1]) >= 0.80 {
+                let c = compound(st, tt, transcriptSlice[ti + 1])
+                totalScore += c; weightSum += 1; matched += 1; si += 1; ti += 2
+            } else if si + 1 < scriptWindow.count, compound(tt, st, scriptWindow[si + 1]) >= 0.80 {
+                let c = compound(tt, st, scriptWindow[si + 1])
+                totalScore += c; weightSum += 1; matched += 1; si += 2; ti += 1
+            } else {
+                var bestSkip = 0.0, best = 0
+                let skipMax = min(4, scriptWindow.count - si - 1)
                 if skipMax >= 1 {
                     for skip in 1...skipMax {
-                        let s = similarity(scriptWindow[si + skip], transcriptSlice[ti])
-                        if s > bestSkip { bestSkip = s }
+                        let s = similarity(scriptWindow[si + skip], tt)
+                        if s > bestSkip { bestSkip = s; best = skip }
                     }
                 }
-                if bestSkip >= 0.75 { si += 1 } else { ti += 1 }
+                if bestSkip >= 0.68 && best > 0 { si += best } else { ti += 1 }
             }
         }
-        guard matched > 0 else { return 0 }
+        guard matched > 0 else { return (0, si) }
         let coverage = Double(matched) / Double(max(transcriptSlice.count, 1))
-        return (totalScore / Double(matched)) * coverage
+        return ((totalScore / max(weightSum, 0.001)) * coverage, si)
     }
 
     static func findBestAlignment(scriptTokens: [String], transcriptTokens: [String],
@@ -244,10 +270,23 @@ run("Similarity low for different words") {
     let s = FuzzyMatcher.similarity("hello","world")
     expect(s < 0.5, "Expected <0.5, got \(s)")
 }
+run("Compound checkout matches check out") {
+    let script = ["please", "complete", "checkout", "now"]
+    let transcript = ["check", "out", "now"]
+    let (score, consumed) = FuzzyMatcher.scoreSequenceFull(
+        scriptTokens: script, transcriptTokens: transcript, scriptOffset: 2)
+    expect(score >= 0.5, "Expected compound match score >=0.5, got \(score)")
+    expect(consumed >= 1, "Expected consume checkout, got \(consumed)")
+}
 run("Score identical sequence high") {
     let t = ["hello","world","today"]
     let s = FuzzyMatcher.scoreSequence(scriptTokens: t, transcriptTokens: t, scriptOffset: 0)
     expect(s > 0.8, "Expected >0.8, got \(s)")
+}
+run("Keeps script-common words like so/well") {
+    let r = TextNormalizer.normalize("so well like actually")
+    expect(r.contains("so"), "Should keep 'so': \(r)")
+    expect(r.contains("well"), "Should keep 'well': \(r)")
 }
 run("Score mismatched sequence low") {
     let s = FuzzyMatcher.scoreSequence(

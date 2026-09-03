@@ -232,10 +232,10 @@ Your capture tool captures at the display level (e.g. OBS Display Capture) and b
 
 ### Teleprompter follows incorrectly
 
-- Adjust **Matching Sensitivity** in Settings → Speech (higher = more lenient)
-- Use **↑/↓ arrows** to manually correct position
+- Try **Match Leniency → Strict** in Settings → Speech (smaller search window, higher confidence required)
+- Use **↑/↓ arrows** to manually correct position — the engine now re-anchors so voice following continues from there
 - If you deviated significantly, press **Reset** and start from the correct paragraph
-- The system needs a few words to re-establish position after a pause
+- The system needs a few words to re-establish position after a pause; short ambiguous phrases alone will not jump the cursor
 
 ### High CPU usage during long sessions
 

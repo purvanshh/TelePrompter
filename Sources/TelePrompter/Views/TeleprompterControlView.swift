@@ -169,7 +169,7 @@ struct TeleprompterControlView: View {
                     .disabled(!state.followingState.isActive)
 
                     Button {
-                        state.jumpToBeginning()
+                        sessionController.seekToBeginning()
                     } label: {
                         Label("Reset", systemImage: "backward.end.fill")
                             .frame(maxWidth: .infinity)
@@ -242,7 +242,7 @@ struct TeleprompterControlView: View {
                 HStack(spacing: 16) {
                     Button {
                         let prev = max(0, state.currentSentenceIndex - 1)
-                        state.jumpToSentence(prev)
+                        sessionController.seekToSentence(prev)
                     } label: {
                         Image(systemName: "chevron.up")
                     }
@@ -251,7 +251,7 @@ struct TeleprompterControlView: View {
 
                     Button {
                         let next = min(state.document.totalSentences - 1, state.currentSentenceIndex + 1)
-                        state.jumpToSentence(next)
+                        sessionController.seekToSentence(next)
                     } label: {
                         Image(systemName: "chevron.down")
                     }
@@ -265,7 +265,7 @@ struct TeleprompterControlView: View {
                         Menu("Jump to Paragraph") {
                             ForEach(state.document.paragraphs) { para in
                                 Button {
-                                    state.jumpToSentence(para.sentenceRange.lowerBound)
+                                    sessionController.seekToSentence(para.sentenceRange.lowerBound)
                                 } label: {
                                     let preview = String(para.text.prefix(50))
                                     Text("¶\(para.id + 1): \(preview)…")

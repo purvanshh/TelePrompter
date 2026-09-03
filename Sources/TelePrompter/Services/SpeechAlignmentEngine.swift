@@ -18,11 +18,9 @@ struct AlignmentUpdate {
 //   partial 3: "Hello everyone today"
 //   final:     "Hello everyone today I want to"
 //
-// A new recognition session starts after each final result. So:
-//   - We keep a `confirmedWordCount` tracking how many words were in the
-//     most recent final result, so we know where the new session started.
-//   - For alignment we use only the LATEST partial/final text of the current session,
-//     matched against the script starting from the current position.
+// A new recognition session starts after each final result. Alignment uses only
+// the current session's tokens, anchored at currentWordIndex, with stability
+// gates so short/ambiguous partials cannot thrash the cursor.
 
 final class SpeechAlignmentEngine {
 
@@ -31,13 +29,18 @@ final class SpeechAlignmentEngine {
     struct Config {
         var searchRadius: Int = 80
         var moveThreshold: Double = 0.30
-        var backtrackThreshold: Double = 0.65
+        var backtrackThreshold: Double = 0.70
+        /// 0 = Strict, 1 = Lenient. Affects threshold, radius, min tokens, jump caps.
         var sensitivity: Double = 0.5
-        var backtrackPenalty: Double = 0.40
-        /// Min words in transcript before attempting alignment
-        var minTranscriptWords: Int = 1
+        var backtrackPenalty: Double = 0.45
+        /// Min words in transcript before attempting alignment (overridden by sensitivity)
+        var minTranscriptWords: Int = 2
         /// Max number of confirmed tokens to retain across sessions (rolling window)
         var confirmedTokenCap: Int = 40
+        /// Consecutive agreeing partials required before committing a *large ambiguous* jump
+        var partialStabilityHits: Int = 2
+        /// How close consecutive partial candidates must be (in words) to count as agreement
+        var partialAgreementWindow: Int = 4
     }
 
     var config: Config
@@ -55,6 +58,12 @@ final class SpeechAlignmentEngine {
     /// Count of confirmed tokens that have already been used for position updates
     private var lastAlignedConfirmedCount: Int = 0
 
+    /// Pending partial candidate waiting for consecutive agreement
+    private var pendingCandidate: Int? = nil
+    private var pendingHits: Int = 0
+    /// Consecutive updates that failed to move — used to force catch-up past hard words
+    private var stalledUpdates: Int = 0
+
     private var document: ScriptDocument = .empty
 
     /// Flat token stream used for matching. Built from each display word's
@@ -70,6 +79,43 @@ final class SpeechAlignmentEngine {
     private let updateSubject = PassthroughSubject<AlignmentUpdate, Never>()
     var updatePublisher: AnyPublisher<AlignmentUpdate, Never> {
         updateSubject.eraseToAnyPublisher()
+    }
+
+    // MARK: - Sensitivity-derived knobs
+
+    /// Effective search radius: Strict ≈ 45, Normal ≈ 70, Lenient ≈ 100
+    private var effectiveSearchRadius: Int {
+        Int(45.0 + config.sensitivity * 55.0)
+    }
+
+    /// Move confidence threshold: Strict ≈ 0.40, Normal ≈ 0.32, Lenient ≈ 0.26
+    private var effectiveMoveThreshold: Double {
+        max(0.24, config.moveThreshold + (0.5 - config.sensitivity) * 0.20)
+    }
+
+    /// Min tokens before aligning: Strict 3, Normal 2, Lenient 2
+    private var effectiveMinWords: Int {
+        if config.sensitivity < 0.33 { return 3 }
+        return 2
+    }
+
+    /// Required uniqueness margin (best − second-best): only applied to large jumps
+    private var effectiveUniquenessMargin: Double {
+        max(0.02, 0.08 - config.sensitivity * 0.05)
+    }
+
+    /// Max words a single partial may advance — roomy so catch-up stays responsive
+    private var maxPartialJump: Int {
+        if config.sensitivity < 0.33 { return 14 }
+        if config.sensitivity < 0.66 { return 22 }
+        return 30
+    }
+
+    /// Max words a final result may advance
+    private var maxFinalJump: Int {
+        if config.sensitivity < 0.33 { return 35 }
+        if config.sensitivity < 0.66 { return 50 }
+        return 70
     }
 
     // MARK: - Lifecycle
@@ -127,6 +173,22 @@ final class SpeechAlignmentEngine {
         confirmedTokens = []
         currentSessionTokens = []
         lastAlignedConfirmedCount = 0
+        clearPending()
+        stalledUpdates = 0
+    }
+
+    private func clearPending() {
+        pendingCandidate = nil
+        pendingHits = 0
+    }
+
+    private func noteStall() {
+        stalledUpdates += 1
+    }
+
+    private func noteProgress() {
+        stalledUpdates = 0
+        clearPending()
     }
 
     // MARK: - Process transcript
@@ -142,43 +204,39 @@ final class SpeechAlignmentEngine {
 
         if isFinal {
             // On final, these tokens represent the complete utterance for this session.
-            // Use ONLY this session's tokens (not accumulated confirmed) for alignment —
-            // the engine's currentWordIndex already points past previously confirmed text.
             currentSessionTokens = tokens
             alignAndEmit(tokens: tokens, isPartial: false)
 
-            // Now commit to confirmed buffer so next session can anchor correctly
             confirmedTokens.append(contentsOf: tokens)
-            // Rolling cap — use configurable limit
             if confirmedTokens.count > config.confirmedTokenCap {
                 confirmedTokens = Array(confirmedTokens.suffix(config.confirmedTokenCap))
             }
             currentSessionTokens = []
             lastAlignedConfirmedCount = confirmedTokens.count
+            clearPending()
         } else {
-            // Partial: Apple sends cumulative text for the current session.
-            // Use ONLY the current session tokens for alignment —
-            // confirmed tokens' position is already captured in currentWordIndex.
             currentSessionTokens = tokens
-
-            guard tokens.count >= config.minTranscriptWords else { return }
+            guard tokens.count >= effectiveMinWords else { return }
             alignAndEmit(tokens: tokens, isPartial: true)
         }
     }
 
     // MARK: - Manual position control
 
+    /// Sync engine position to a user-selected word. Does not publish an update —
+    /// the UI already owns the visible cursor.
     func setPosition(wordIndex: Int) {
         guard wordIndex >= 0 && wordIndex < document.totalWords else { return }
         currentWordIndex = wordIndex
         if let sentence = document.sentence(containingWord: wordIndex) {
             currentSentenceIndex = sentence.id
         }
-        // Clear buffers when manually repositioned so next speech starts fresh
         confirmedTokens = []
         currentSessionTokens = []
         lastAlignedConfirmedCount = 0
-        emitUpdate(wordIndex: wordIndex, confidence: 1.0, transcript: "")
+        clearPending()
+        stalledUpdates = 0
+        lastConfidence = 1.0
     }
 
     // MARK: - Core alignment
@@ -186,62 +244,132 @@ final class SpeechAlignmentEngine {
     private func alignAndEmit(tokens: [String], isPartial: Bool) {
         guard !tokens.isEmpty, !scriptTokens.isEmpty else { return }
 
-        // Use the trailing N tokens for matching (the most recently spoken words)
-        let matchTokens = Array(tokens.suffix(20))
+        // Prefer recently spoken words; keep enough context for catch-up when lagging.
+        let suffixLen = isPartial ? min(18, tokens.count) : min(28, tokens.count)
+        let matchTokens = Array(tokens.suffix(suffixLen))
 
-        // Alignment works in flat-token space, so anchor the search at the flat
-        // token index of the current display word.
         let currentTokenIndex = tokenIndex(forDisplayWord: currentWordIndex)
 
         let result = FuzzyMatcher.findBestAlignment(
             scriptTokens: scriptTokens,
             transcriptTokens: matchTokens,
             currentIndex: currentTokenIndex,
-            searchRadius: config.searchRadius,
-            backtrackPenalty: config.backtrackPenalty
+            searchRadius: effectiveSearchRadius,
+            backtrackPenalty: config.backtrackPenalty,
+            forwardPenaltyPerWord: 0.045,
+            minForwardFactor: 0.35
         )
 
-        // Threshold: partials need less confidence to keep things responsive,
-        // but we use a higher bar to prevent wild jumps
-        let threshold: Double
+        var threshold = effectiveMoveThreshold
+        // When stalled on a hard word, lower the bar so we can skip past it.
+        if stalledUpdates >= 3 {
+            threshold -= 0.06
+        }
         if isPartial {
-            threshold = config.moveThreshold * (1.0 - config.sensitivity * 0.4)
+            threshold += 0.02
         } else {
-            threshold = config.moveThreshold * (1.0 - config.sensitivity * 0.5)
+            threshold -= 0.04
         }
 
         let confidence = result.confidence
         lastConfidence = confidence
 
         guard confidence >= threshold else {
-            // Not confident enough — stay put, but still emit so the UI shows "low confidence"
+            noteStall()
             emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
                        transcript: matchTokens.joined(separator: " "))
             return
         }
 
-        // bestWordIndex is the START of the match in token space.
-        // Advance to the END of the matched section — that's where the speaker is NOW.
         let matchStart = result.bestWordIndex
-        let matchEndToken = min(scriptTokens.count - 1, matchStart + result.matchedTokenCount)
-
-        // Map token positions back to display-word indices for the UI/state.
+        let matchEndToken = min(scriptTokens.count - 1, matchStart + max(0, result.matchedTokenCount - 1))
         let candidate = displayWord(forToken: matchEndToken)
-        let distance  = candidate - currentWordIndex  // positive = forward
+        let distance = candidate - currentWordIndex
+        let absDistance = abs(distance)
 
-        // Movement rules:
-        if distance >= 0 {
-            // Forward movement — always allowed
-            currentWordIndex = candidate
-        } else if abs(distance) <= 8 && confidence >= config.backtrackThreshold {
-            // Small backward movement with high confidence (e.g., user repeated a sentence)
-            currentWordIndex = candidate
+        // Uniqueness only gates large leaps — small/medium forward catch-up stays responsive.
+        let needsStrongUniqueness = absDistance > 14
+        if needsStrongUniqueness && result.scoreMargin < effectiveUniquenessMargin && stalledUpdates < 4 {
+            noteStall()
+            emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
+                       transcript: matchTokens.joined(separator: " "))
+            return
         }
-        // Else: ignore backward movement — the user likely triggered a false match
 
+        // Movement policy — prefer catching up when the speaker is ahead.
+        var accepted: Int? = nil
+
+        if distance >= 0 {
+            let maxJump = isPartial ? maxPartialJump : maxFinalJump
+            if distance <= maxJump {
+                accepted = candidate
+            } else if confidence >= threshold + 0.08 {
+                // Speaker got far ahead — catch up in chunks instead of staying stuck.
+                accepted = currentWordIndex + maxJump
+            }
+        } else if absDistance <= 6 && confidence >= config.backtrackThreshold
+                    && result.scoreMargin >= effectiveUniquenessMargin * 0.4 {
+            accepted = candidate
+        }
+
+        // Stuck recovery: if we keep failing to move but ASR matches somewhere ahead,
+        // nudge forward by a few words so hard tokens like "checkout" don't freeze us.
+        if accepted == nil && stalledUpdates >= 4 && distance > 0 {
+            accepted = min(candidate, currentWordIndex + 6)
+        }
+
+        guard let target = accepted else {
+            noteStall()
+            emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
+                       transcript: matchTokens.joined(separator: " "))
+            return
+        }
+
+        // Stability: forward catch-up commits immediately. Only large ambiguous jumps wait.
+        if isPartial {
+            let forwardDistance = target - currentWordIndex
+            let needsHits: Int
+            if forwardDistance <= 10 || stalledUpdates >= 3 {
+                needsHits = 1
+            } else if forwardDistance <= 18 {
+                needsHits = 1
+            } else {
+                needsHits = config.partialStabilityHits
+            }
+
+            if needsHits > 1 {
+                if let pending = pendingCandidate,
+                   abs(target - pending) <= config.partialAgreementWindow {
+                    pendingHits += 1
+                    pendingCandidate = target
+                } else {
+                    pendingCandidate = target
+                    pendingHits = 1
+                }
+                guard pendingHits >= needsHits else {
+                    noteStall()
+                    emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
+                               transcript: matchTokens.joined(separator: " "))
+                    return
+                }
+            }
+        } else {
+            clearPending()
+        }
+
+        // Never move backward accidentally when catching up after a stall
+        if target < currentWordIndex && stalledUpdates >= 2 {
+            noteStall()
+            emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
+                       transcript: matchTokens.joined(separator: " "))
+            return
+        }
+
+        currentWordIndex = target
         if let sentence = document.sentence(containingWord: currentWordIndex) {
             currentSentenceIndex = sentence.id
         }
+        noteProgress()
 
         emitUpdate(wordIndex: currentWordIndex, confidence: confidence,
                    transcript: matchTokens.joined(separator: " "))

@@ -60,36 +60,36 @@ struct FuzzyMatcherTests {
     @Test("Identical token sequence scores high")
     func scoreIdenticalSequence() {
         let tokens = ["hello", "world", "today"]
-        let score = FuzzyMatcher.scoreSequence(
+        let result = FuzzyMatcher.scoreSequence(
             scriptTokens: tokens,
             transcriptTokens: tokens,
             scriptOffset: 0
         )
-        #expect(score > 0.8, "Expected >0.8, got \(score)")
+        #expect(result.score > 0.8, "Expected >0.8, got \(result.score)")
     }
 
     @Test("Completely different sequences score low")
     func scoreMismatch() {
         let script = ["hello", "world", "today"]
         let transcript = ["xyz", "abc", "def"]
-        let score = FuzzyMatcher.scoreSequence(
+        let result = FuzzyMatcher.scoreSequence(
             scriptTokens: script,
             transcriptTokens: transcript,
             scriptOffset: 0
         )
-        #expect(score < 0.3, "Expected <0.3, got \(score)")
+        #expect(result.score < 0.3, "Expected <0.3, got \(result.score)")
     }
 
     @Test("Score tolerates a skipped word")
     func scoreSkippedWord() {
         let script = ["hello", "beautiful", "world"]
         let transcript = ["hello", "world"]
-        let score = FuzzyMatcher.scoreSequence(
+        let result = FuzzyMatcher.scoreSequence(
             scriptTokens: script,
             transcriptTokens: transcript,
             scriptOffset: 0
         )
-        #expect(score > 0.3, "Expected >0.3 for skipped word, got \(score)")
+        #expect(result.score > 0.3, "Expected >0.3 for skipped word, got \(result.score)")
     }
 
     // MARK: - Best alignment

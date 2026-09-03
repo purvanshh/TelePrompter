@@ -5,6 +5,14 @@ import Foundation
 
 struct FuzzyMatcher {
 
+    /// High-frequency words that should not dominate alignment scores.
+    private static let stopwords: Set<String> = [
+        "a", "an", "the", "and", "or", "but", "to", "of", "in", "on", "at",
+        "for", "is", "are", "was", "were", "be", "been", "am", "i", "you",
+        "we", "they", "he", "she", "it", "this", "that", "with", "as", "by",
+        "from", "my", "our", "your", "their"
+    ]
+
     // MARK: - Levenshtein distance (character-level)
 
     static func levenshteinDistance(_ a: String, _ b: String) -> Int {
@@ -40,6 +48,29 @@ struct FuzzyMatcher {
         return 1.0 - Double(dist) / Double(maxLen)
     }
 
+    private static func tokenWeight(_ token: String) -> Double {
+        stopwords.contains(token) ? 0.55 : 1.0
+    }
+
+    /// Accept threshold: slightly looser for longer content words (ASR often garbles them).
+    private static func matchThreshold(for token: String) -> Double {
+        token.count >= 7 ? 0.68 : 0.75
+    }
+
+    /// True when ASR/script disagree on compound spacing: "checkout" ↔ "check out".
+    private static func compoundMatch(a: String, bParts: [String]) -> Double {
+        guard bParts.count >= 2 else { return 0 }
+        let joined = bParts.joined()
+        let sim = similarity(a, joined)
+        // Also accept if a starts with first part and ends with last (checkout / check+out)
+        if sim >= 0.80 { return sim }
+        if a.hasPrefix(bParts[0]) && a.hasSuffix(bParts[bParts.count - 1])
+            && a.count >= joined.count - 1 && a.count <= joined.count + 1 {
+            return 0.92
+        }
+        return sim >= 0.72 ? sim : 0
+    }
+
     // MARK: - Token sequence matching
 
     /// Score how well `transcript` tokens match `script` tokens starting at a given offset.
@@ -57,53 +88,108 @@ struct FuzzyMatcher {
         let compareLen = min(transcriptTokens.count, available)
         let transcriptSlice = Array(transcriptTokens.suffix(compareLen))
 
-        // Dynamic programming: find best alignment
         var totalScore = 0.0
         var matched = 0
+        var weightSum = 0.0
 
         var si = 0
         var ti = 0
 
         while si < scriptWindow.count && ti < transcriptSlice.count {
-            let sim = similarity(scriptWindow[si], transcriptSlice[ti])
-            if sim >= 0.75 {
-                totalScore += sim
+            let scriptToken = scriptWindow[si]
+            let transcriptToken = transcriptSlice[ti]
+            let sim = similarity(scriptToken, transcriptToken)
+            let threshold = min(matchThreshold(for: scriptToken), matchThreshold(for: transcriptToken))
+
+            if sim >= threshold {
+                let weight = tokenWeight(scriptToken)
+                totalScore += sim * weight
+                weightSum += weight
                 matched += 1
                 si += 1
                 ti += 1
-            } else {
-                // Try skipping one script token (speaker omitted a word)
-                var bestSkipScore = 0.0
-                let skipMax = min(3, scriptWindow.count - si - 1)
-                if skipMax >= 1 {
-                    for skip in 1...skipMax {
-                        let skipSim = similarity(scriptWindow[si + skip], transcriptSlice[ti])
-                        if skipSim > bestSkipScore {
-                            bestSkipScore = skipSim
+                continue
+            }
+
+            // Compound: script "checkout" vs transcript "check" + "out"
+            if ti + 1 < transcriptSlice.count {
+                let compound = compoundMatch(a: scriptToken,
+                                             bParts: [transcriptToken, transcriptSlice[ti + 1]])
+                if compound >= 0.80 {
+                    let weight = tokenWeight(scriptToken)
+                    totalScore += compound * weight
+                    weightSum += weight
+                    matched += 1
+                    si += 1
+                    ti += 2
+                    continue
+                }
+            }
+
+            // Compound: script "check" + "out" vs transcript "checkout"
+            if si + 1 < scriptWindow.count {
+                let compound = compoundMatch(a: transcriptToken,
+                                             bParts: [scriptToken, scriptWindow[si + 1]])
+                if compound >= 0.80 {
+                    let weight = max(tokenWeight(scriptToken), tokenWeight(scriptWindow[si + 1]))
+                    totalScore += compound * weight
+                    weightSum += weight
+                    matched += 1
+                    si += 2
+                    ti += 1
+                    continue
+                }
+            }
+
+            // Try skipping one or more script tokens (hard/misheard word — catch up)
+            var bestSkipScore = 0.0
+            var bestSkip = 0
+            let skipMax = min(4, scriptWindow.count - si - 1)
+            if skipMax >= 1 {
+                for skip in 1...skipMax {
+                    let skipSim = similarity(scriptWindow[si + skip], transcriptSlice[ti])
+                    let skipThreshold = matchThreshold(for: scriptWindow[si + skip])
+                    if skipSim >= skipThreshold && skipSim > bestSkipScore {
+                        bestSkipScore = skipSim
+                        bestSkip = skip
+                    }
+                    // Also try compound after a skip
+                    if ti + 1 < transcriptSlice.count {
+                        let c = compoundMatch(a: scriptWindow[si + skip],
+                                              bParts: [transcriptSlice[ti], transcriptSlice[ti + 1]])
+                        if c > bestSkipScore {
+                            bestSkipScore = c
+                            bestSkip = skip
                         }
                     }
                 }
-                if bestSkipScore >= 0.75 {
-                    si += 1 // skip the unmatched script token
-                } else {
-                    ti += 1 // skip the unmatched transcript token (filler/extra)
-                }
+            }
+            if bestSkipScore >= 0.68 && bestSkip > 0 {
+                si += bestSkip
+                // Do not consume transcript yet — retry match at new script position
+            } else {
+                ti += 1 // skip the unmatched transcript token (filler/extra/ASR noise)
             }
         }
 
         guard matched > 0 else { return (0, si) }
 
-        // Score = avg similarity of matched pairs, weighted by coverage
+        // Score = weighted avg similarity × coverage, with a light unique-phrase bonus
         let coverage = Double(matched) / Double(max(transcriptSlice.count, 1))
-        return ((totalScore / Double(matched)) * coverage, si)
+        let avgSim = totalScore / max(weightSum, 0.001)
+        let jaccard = ngramJaccard(transcriptSlice, Array(scriptWindow.prefix(max(compareLen, 1))))
+        let score = (avgSim * coverage) * (0.85 + 0.15 * jaccard)
+        return (score, si)
     }
 
     // MARK: - Sliding window search
 
     struct AlignmentResult {
-        let bestWordIndex: Int    // index into script words
+        let bestWordIndex: Int    // index into script tokens
         let confidence: Double    // 0..1
         let matchedTokenCount: Int
+        /// How much the best score beats the second-best candidate (0 if unique/no runner-up).
+        let scoreMargin: Double
     }
 
     /// Search for the best alignment of `transcriptTokens` within `scriptTokens`,
@@ -115,22 +201,26 @@ struct FuzzyMatcher {
         currentIndex: Int,
         searchRadius: Int = 50,
         backtrackPenalty: Double = 0.3,
-        forwardPenaltyPerWord: Double = 0.05
+        forwardPenaltyPerWord: Double = 0.08,
+        minForwardFactor: Double = 0.25
     ) -> AlignmentResult {
 
         guard !transcriptTokens.isEmpty && !scriptTokens.isEmpty else {
-            return AlignmentResult(bestWordIndex: currentIndex, confidence: 0, matchedTokenCount: 0)
+            return AlignmentResult(bestWordIndex: currentIndex, confidence: 0,
+                                   matchedTokenCount: 0, scoreMargin: 0)
         }
 
         let searchStart = max(0, currentIndex - searchRadius / 4) // limited backward search
         let searchEnd   = min(scriptTokens.count - 1, currentIndex + searchRadius)
 
         guard searchStart <= searchEnd else {
-            return AlignmentResult(bestWordIndex: currentIndex, confidence: 0, matchedTokenCount: 0)
+            return AlignmentResult(bestWordIndex: currentIndex, confidence: 0,
+                                   matchedTokenCount: 0, scoreMargin: 0)
         }
 
         var bestIndex = currentIndex
         var bestScore = -1.0
+        var secondBestScore = -1.0
         var bestConsumed = 0
 
         for si in searchStart...searchEnd {
@@ -147,30 +237,35 @@ struct FuzzyMatcher {
                 score *= (1.0 - backtrackPenalty)
             } else if si > currentIndex {
                 // Penalize matches that are far ahead of the current position.
-                // A match that leaps many words forward is usually a false positive
-                // caused by repeated/common words (e.g. "it is", "I'll") re-appearing
-                // later in the script. Nearby contiguous matches are far more likely
-                // to be the words actually being read, so let them win unless a distant
-                // match is dramatically stronger. The discount is capped so a genuinely
-                // strong far match (speaker skipped ahead / a recognition gap) can still
-                // be selected.
+                // Nearby contiguous matches are far more likely to be the words
+                // actually being read. Floor is low so distant false positives lose.
                 let distance = Double(si - currentIndex)
                 let decay = 1.0 / (1.0 + forwardPenaltyPerWord * distance)
-                let minFactor = 0.5
-                score *= max(minFactor, decay)
+                score *= max(minForwardFactor, decay)
             }
 
             if score > bestScore {
+                secondBestScore = bestScore
                 bestScore = score
                 bestIndex = si
                 bestConsumed = consumed
+            } else if score > secondBestScore {
+                secondBestScore = score
             }
+        }
+
+        let margin: Double
+        if secondBestScore < 0 {
+            margin = bestScore
+        } else {
+            margin = max(0, bestScore - secondBestScore)
         }
 
         return AlignmentResult(
             bestWordIndex: bestIndex,
             confidence: max(0, min(1, bestScore)),
-            matchedTokenCount: bestConsumed
+            matchedTokenCount: bestConsumed,
+            scoreMargin: margin
         )
     }
 

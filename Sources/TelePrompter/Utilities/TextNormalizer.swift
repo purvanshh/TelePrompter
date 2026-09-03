@@ -63,11 +63,11 @@ struct TextNormalizer {
         "must've":  "must have",
     ]
 
-    // Common filler words that should be ignored during matching
+    // Hesitation fillers only. Do NOT strip words that often appear in real scripts
+    // ("so", "well", "like", "actually", "right") — removing them collapses uniqueness
+    // and makes common phrases collide across the document.
     static let fillerWords: Set<String> = [
-        "um", "uh", "er", "ah", "like", "so", "well",
-        "you know", "i mean", "basically", "literally",
-        "actually", "right", "okay", "ok"
+        "um", "uh", "er", "ah", "uhm", "err"
     ]
 
     // MARK: - Main normalization entry point
