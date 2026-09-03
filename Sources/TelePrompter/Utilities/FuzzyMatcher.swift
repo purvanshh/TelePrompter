@@ -114,7 +114,8 @@ struct FuzzyMatcher {
         transcriptTokens: [String],
         currentIndex: Int,
         searchRadius: Int = 50,
-        backtrackPenalty: Double = 0.3
+        backtrackPenalty: Double = 0.3,
+        forwardPenaltyPerWord: Double = 0.05
     ) -> AlignmentResult {
 
         guard !transcriptTokens.isEmpty && !scriptTokens.isEmpty else {
@@ -144,6 +145,19 @@ struct FuzzyMatcher {
             // Apply backtrack penalty for positions before current
             if si < currentIndex {
                 score *= (1.0 - backtrackPenalty)
+            } else if si > currentIndex {
+                // Penalize matches that are far ahead of the current position.
+                // A match that leaps many words forward is usually a false positive
+                // caused by repeated/common words (e.g. "it is", "I'll") re-appearing
+                // later in the script. Nearby contiguous matches are far more likely
+                // to be the words actually being read, so let them win unless a distant
+                // match is dramatically stronger. The discount is capped so a genuinely
+                // strong far match (speaker skipped ahead / a recognition gap) can still
+                // be selected.
+                let distance = Double(si - currentIndex)
+                let decay = 1.0 / (1.0 + forwardPenaltyPerWord * distance)
+                let minFactor = 0.5
+                score *= max(minFactor, decay)
             }
 
             if score > bestScore {

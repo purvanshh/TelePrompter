@@ -59,6 +59,7 @@ final class SessionController: ObservableObject {
                 guard let self = self else { return }
                 guard self.state.followingState.isActive || self.state.followingState == .listening else { return }
                 self.state.latestPartial = result.isFinal ? "" : result.text
+                self.state.transcriptBuffer = result.text
                 self.lastSpeechTime = Date()
                 self.resetSilenceTimer()
 

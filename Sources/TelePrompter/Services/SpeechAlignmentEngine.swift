@@ -56,7 +56,16 @@ final class SpeechAlignmentEngine {
     private var lastAlignedConfirmedCount: Int = 0
 
     private var document: ScriptDocument = .empty
+
+    /// Flat token stream used for matching. Built from each display word's
+    /// normalized text split into individual tokens (e.g. a contraction such as
+    /// "I'll" expands to the two tokens "i" and "will"), so it matches the
+    /// tokenization that transcripts go through in TextNormalizer.
     private var scriptTokens: [String] = []
+    /// For each flat token, the display-word index it belongs to.
+    private var tokenWordIndex: [Int] = []
+    /// The first flat-token index of each display word (for index round-tripping).
+    private var wordStartToken: [Int] = []
 
     private let updateSubject = PassthroughSubject<AlignmentUpdate, Never>()
     var updatePublisher: AnyPublisher<AlignmentUpdate, Never> {
@@ -71,8 +80,44 @@ final class SpeechAlignmentEngine {
 
     func load(document: ScriptDocument) {
         self.document = document
-        self.scriptTokens = document.words.map { $0.normalized }
+        buildTokenStream(document)
         reset()
+    }
+
+    /// Build a flat, normalized token stream from the script's display words.
+    ///
+    /// Alignment must run on a token stream produced by the same normalizer used
+    /// on transcripts (TextNormalizer). The parser stores one `ScriptWord` per
+    /// display word, but a single display word can normalize into several tokens
+    /// (contractions like "I'll" → ["i","will"], hyphenated words like
+    /// "high-risk" → ["high","risk"]). If we matched against the raw per-word
+    /// strings, "i will" (one entry) would never align with the transcript's two
+    /// separate tokens "i" and "will", and voice follow would fail on real scripts.
+    private func buildTokenStream(_ document: ScriptDocument) {
+        scriptTokens = []
+        tokenWordIndex = []
+        wordStartToken = []
+
+        for (wordIndex, word) in document.words.enumerated() {
+            let tokens = word.normalized.split(whereSeparator: { $0 == " " || $0 == "\n" })
+            wordStartToken.append(scriptTokens.count)
+            for token in tokens where !token.isEmpty {
+                scriptTokens.append(String(token))
+                tokenWordIndex.append(wordIndex)
+            }
+        }
+    }
+
+    /// Flat-token index corresponding to the given display-word index.
+    private func tokenIndex(forDisplayWord wordIndex: Int) -> Int {
+        guard !wordStartToken.isEmpty else { return 0 }
+        return wordStartToken[Swift.min(Swift.max(0, wordIndex), wordStartToken.count - 1)]
+    }
+
+    /// Display-word index corresponding to the given flat-token index.
+    private func displayWord(forToken tokenIndex: Int) -> Int {
+        guard !tokenWordIndex.isEmpty else { return 0 }
+        return tokenWordIndex[Swift.min(Swift.max(0, tokenIndex), tokenWordIndex.count - 1)]
     }
 
     func reset() {
@@ -144,10 +189,14 @@ final class SpeechAlignmentEngine {
         // Use the trailing N tokens for matching (the most recently spoken words)
         let matchTokens = Array(tokens.suffix(20))
 
+        // Alignment works in flat-token space, so anchor the search at the flat
+        // token index of the current display word.
+        let currentTokenIndex = tokenIndex(forDisplayWord: currentWordIndex)
+
         let result = FuzzyMatcher.findBestAlignment(
             scriptTokens: scriptTokens,
             transcriptTokens: matchTokens,
-            currentIndex: currentWordIndex,
+            currentIndex: currentTokenIndex,
             searchRadius: config.searchRadius,
             backtrackPenalty: config.backtrackPenalty
         )
@@ -171,13 +220,13 @@ final class SpeechAlignmentEngine {
             return
         }
 
-        // bestWordIndex is the START of the match in the script.
+        // bestWordIndex is the START of the match in token space.
         // Advance to the END of the matched section — that's where the speaker is NOW.
         let matchStart = result.bestWordIndex
-        let matchEnd = min(scriptTokens.count - 1, matchStart + result.matchedTokenCount)
+        let matchEndToken = min(scriptTokens.count - 1, matchStart + result.matchedTokenCount)
 
-        // The candidate position is the end of what was spoken
-        let candidate = matchEnd
+        // Map token positions back to display-word indices for the UI/state.
+        let candidate = displayWord(forToken: matchEndToken)
         let distance  = candidate - currentWordIndex  // positive = forward
 
         // Movement rules:
